@@ -7,11 +7,14 @@ import modal
 
 # Import from local packages
 from sandbox.image import sandbox_image
+from security.utils import get_scoped_path
 
 logger = logging.getLogger(__name__)
 
 # Extend sandbox image to include local Python packages
-sandbox_image_with_packages = sandbox_image.add_local_python_source("common", "gateway", "sandbox")
+sandbox_image_with_packages = sandbox_image.add_local_python_source(
+    "common", "gateway", "sandbox", "security"
+)
 
 # Import from local packages (after image is set up, these are runtime imports)
 from common.r2_sync import R2Sync
@@ -400,6 +403,118 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
             return False
         finally:
             loop.close()
+
+    @modal.method()
+    def read_file(self, scope: str, relative_path: str) -> str:
+        """
+        Read a file from a scoped directory (prototype, frontend, etc.).
+
+        Args:
+            scope: The scope directory (prototype, frontend, dbml, test-case).
+            relative_path: The relative path within the scope.
+
+        Returns:
+            The file contents as a string.
+
+        Raises:
+            SecurityError: If path escapes scope.
+            FileNotFoundError: If file doesn't exist.
+        """
+        validated_path = get_scoped_path(self.workspace, scope, relative_path)
+        with open(validated_path) as f:
+            return f.read()
+
+    @modal.method()
+    def write_file(self, scope: str, relative_path: str, content: str) -> bool:
+        """
+        Write a file to a scoped directory.
+
+        Args:
+            scope: The scope directory (prototype, frontend, dbml, test-case).
+            relative_path: The relative path within the scope.
+            content: The content to write.
+
+        Returns:
+            True if the write was successful.
+
+        Raises:
+            SecurityError: If path escapes scope.
+        """
+        validated_path = get_scoped_path(self.workspace, scope, relative_path)
+        path = Path(validated_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        return True
+
+    @modal.method()
+    def list_files(self, scope: str) -> list[str]:
+        """
+        List all files in a scoped directory.
+
+        Args:
+            scope: The scope directory (prototype, frontend, dbml, test-case).
+
+        Returns:
+            List of relative file paths within the scope.
+        """
+        scope_path = Path(self.workspace) / scope
+        if not scope_path.exists():
+            return []
+        return [str(f.relative_to(scope_path)) for f in scope_path.rglob("*") if f.is_file()]
+
+    @modal.method()
+    def delete_file(self, scope: str, relative_path: str) -> bool:
+        """
+        Delete a file from a scoped directory.
+
+        Args:
+            scope: The scope directory (prototype, frontend, dbml, test-case).
+            relative_path: The relative path within the scope.
+
+        Returns:
+            True if the file was deleted successfully.
+
+        Raises:
+            SecurityError: If path escapes scope.
+            FileNotFoundError: If file doesn't exist.
+        """
+        validated_path = get_scoped_path(self.workspace, scope, relative_path)
+        path = Path(validated_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {relative_path}")
+        path.unlink()
+        return True
+
+    @modal.method()
+    def rename_file(self, scope: str, old_path: str, new_path: str) -> bool:
+        """
+        Rename/move a file within a scoped directory.
+
+        Args:
+            scope: The scope directory (prototype, frontend, dbml, test-case).
+            old_path: The current relative path within the scope.
+            new_path: The new relative path within the scope.
+
+        Returns:
+            True if the file was renamed successfully.
+
+        Raises:
+            SecurityError: If either path escapes scope.
+            FileNotFoundError: If source file doesn't exist.
+        """
+        validated_old = get_scoped_path(self.workspace, scope, old_path)
+        validated_new = get_scoped_path(self.workspace, scope, new_path)
+
+        old_file = Path(validated_old)
+        new_file = Path(validated_new)
+
+        if not old_file.exists():
+            raise FileNotFoundError(f"File not found: {old_path}")
+
+        # Create parent directories if needed
+        new_file.parent.mkdir(parents=True, exist_ok=True)
+        old_file.rename(new_file)
+        return True
 
 
 # Standalone test entrypoint
