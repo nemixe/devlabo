@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+/* Custom theme configuration for Tailwind v4 */
+@theme {
+  /* Custom palette */
+  --color-shadow-grey: #2D2A32;
+  --color-golden-glow: #DDD92A;
+  --color-banana-cream: #EAE151;
+  --color-vanilla-custard: #EEEFA8;
+  --color-porcelain: #FAFDF6;
+
+  /* Surface colors */
+  --color-surface: #3A363F;
+  --color-surface-hover: #454049;
+
+  /* Border */
+  --color-border: #4A454F;
+
+  /* Fonts */
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'Fira Code', monospace;
+
+  /* Border radius */
+  --radius-lg: 0.5rem;
+  --radius-md: 0.375rem;
+  --radius-sm: 0.25rem;
+}
+
+/* CSS custom properties for semantic colors */
+:root {
+  --background: #2D2A32;
+  --foreground: #FAFDF6;
+  --primary: #DDD92A;
+  --primary-foreground: #2D2A32;
+  --muted: #EEEFA8;
+  --muted-foreground: #9A959F;
+  --accent: #DDD92A;
+  --accent-foreground: #2D2A32;
+  --surface: #3A363F;
+  --border: #4A454F;
+  --input: #3A363F;
+  --ring: #DDD92A;
+}
+
+/* Base styles */
+* {
+  border-color: var(--border);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Focus ring */
+*:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 50%, transparent);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background-color: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--muted-foreground);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

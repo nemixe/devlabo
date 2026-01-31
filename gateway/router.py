@@ -3,11 +3,14 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 if TYPE_CHECKING:
     from sandbox.process_manager import ProcessManager
@@ -269,6 +272,7 @@ class GatewayRouter:
 def create_gateway_app(
     process_manager: "ProcessManager | None" = None,
     client_timeout: float = 30.0,
+    client_dir: str | None = None,
 ) -> FastAPI:
     """
     Create a FastAPI app configured as a reverse proxy gateway.
@@ -276,6 +280,7 @@ def create_gateway_app(
     Args:
         process_manager: Optional ProcessManager for health monitoring.
         client_timeout: Timeout for proxied HTTP requests.
+        client_dir: Optional path to the client build directory for static files.
 
     Returns:
         Configured FastAPI application.
@@ -295,6 +300,15 @@ def create_gateway_app(
         lifespan=lifespan,
     )
 
+    # Add CORS middleware for browser requests
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Configure appropriately for production
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     @app.get("/health")
     async def health_check():
         """Gateway and process health check endpoint."""
@@ -304,6 +318,44 @@ def create_gateway_app(
             result["processes"] = router.process_manager.get_all_status()
 
         return result
+
+    @app.post("/agent/chat")
+    async def agent_chat(request: Request):
+        """
+        Proxy chat requests to the AI agent.
+
+        Expects JSON body with:
+        - message: str - The user's message
+        - context: optional dict with userId, projectId, activeModule
+        """
+        try:
+            import modal
+
+            body = await request.json()
+            message = body.get("message", "")
+            context = body.get("context", {})
+
+            user_id = context.get("userId", "default")
+            project_id = context.get("projectId", "default")
+
+            # Get reference to the deployed DeepAgent
+            AgentCls = modal.Cls.from_name("devlabo-agent", "DeepAgent")
+            agent = AgentCls(user_id=user_id, project_id=project_id)
+
+            # Call the chat method
+            result = agent.chat.remote(message=message)
+
+            return {
+                "message": result.get("response", "No response"),
+                "actions": [
+                    {"type": "file_modified", "path": f}
+                    for f in result.get("files_changed", [])
+                ],
+            }
+
+        except Exception as e:
+            logger.error(f"Agent chat error: {e}")
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     @app.api_route(
         "/connect/{user}/{project}/{module}/{path:path}",
@@ -353,5 +405,12 @@ def create_gateway_app(
     ):
         """Proxy WebSocket connections to internal dev server root."""
         await router.proxy_websocket(websocket, user, project, module, "")
+
+    # Mount static files for the client app if directory exists
+    if client_dir:
+        client_path = Path(client_dir)
+        if client_path.is_dir():
+            app.mount("/app", StaticFiles(directory=client_path, html=True), name="client")
+            logger.info(f"Mounted client static files from {client_path}")
 
     return app
