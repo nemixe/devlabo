@@ -3,14 +3,12 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 
 if TYPE_CHECKING:
     from sandbox.process_manager import ProcessManager
@@ -272,7 +270,6 @@ class GatewayRouter:
 def create_gateway_app(
     process_manager: "ProcessManager | None" = None,
     client_timeout: float = 30.0,
-    client_dir: str | None = None,
 ) -> FastAPI:
     """
     Create a FastAPI app configured as a reverse proxy gateway.
@@ -280,7 +277,6 @@ def create_gateway_app(
     Args:
         process_manager: Optional ProcessManager for health monitoring.
         client_timeout: Timeout for proxied HTTP requests.
-        client_dir: Optional path to the client build directory for static files.
 
     Returns:
         Configured FastAPI application.
@@ -405,12 +401,5 @@ def create_gateway_app(
     ):
         """Proxy WebSocket connections to internal dev server root."""
         await router.proxy_websocket(websocket, user, project, module, "")
-
-    # Mount static files for the client app if directory exists
-    if client_dir:
-        client_path = Path(client_dir)
-        if client_path.is_dir():
-            app.mount("/app", StaticFiles(directory=client_path, html=True), name="client")
-            logger.info(f"Mounted client static files from {client_path}")
 
     return app

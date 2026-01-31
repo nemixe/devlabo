@@ -1,4 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
+import { agentChatUrl } from '@/lib/api'
 import type { ModuleType, AgentRequest, AgentResponse } from '@/types'
 
 interface UseAgentOptions {
@@ -10,7 +11,7 @@ interface UseAgentOptions {
 }
 
 async function sendAgentMessage(request: AgentRequest): Promise<AgentResponse> {
-  const response = await fetch('/agent/chat', {
+  const response = await fetch(agentChatUrl(), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

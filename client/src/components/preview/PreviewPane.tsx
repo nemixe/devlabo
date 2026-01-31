@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { RefreshCw, ExternalLink } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { previewUrl as buildPreviewUrl } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import type { ModuleType } from '@/types'
 
@@ -26,7 +27,7 @@ export function PreviewPane({
 }: PreviewPaneProps) {
   const [refreshKey, setRefreshKey] = useState(0)
 
-  const previewUrl = `/connect/${userId}/${projectId}/${activeModule}/`
+  const previewUrl = buildPreviewUrl(userId, projectId, activeModule)
 
   const handleRefresh = () => {
     setRefreshKey((prev) => prev + 1)

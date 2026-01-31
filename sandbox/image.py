@@ -2,11 +2,9 @@
 
 import modal
 
-# Path to client build directory (relative to project root)
-CLIENT_DIST_PATH = "client/dist"
-
-# Define the base sandbox image with all required tooling
-_base_sandbox_image = (
+# Define the sandbox image with all required tooling
+# Note: Client dashboard is deployed separately (Vercel, Cloudflare Pages, etc.)
+sandbox_image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install(
         "curl",
@@ -41,28 +39,9 @@ _base_sandbox_image = (
             "PNPM_HOME": "/root/.local/share/pnpm",
             # Ensure Node.js uses UTF-8
             "NODE_OPTIONS": "--max-old-space-size=4096",
-            # Client build location
-            "DEVLABO_CLIENT_DIR": "/app/client",
         }
     )
 )
-
-
-def _create_sandbox_image() -> modal.Image:
-    """Create sandbox image, including client build if available."""
-    from pathlib import Path
-
-    client_dist = Path(CLIENT_DIST_PATH)
-    if client_dist.is_dir():
-        # Include client build in image
-        return _base_sandbox_image.copy_local_dir(
-            CLIENT_DIST_PATH, "/app/client"
-        )
-    # Return base image without client (for development)
-    return _base_sandbox_image
-
-
-sandbox_image = _create_sandbox_image()
 
 # Create Modal app for testing the image
 app = modal.App("devlabo-sandbox-image-test")

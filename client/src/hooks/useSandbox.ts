@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { sandboxFilesUrl } from '@/lib/api'
 import type { FileNode, SandboxFile } from '@/types'
 
 interface UseSandboxOptions {
@@ -12,9 +13,7 @@ async function fetchFileTree(
   projectId: string,
   module: string
 ): Promise<FileNode[]> {
-  const response = await fetch(
-    `/connect/${userId}/${projectId}/${module}/api/files`
-  )
+  const response = await fetch(sandboxFilesUrl(userId, projectId, module))
 
   if (!response.ok) {
     throw new Error('Failed to fetch file tree')
@@ -29,9 +28,8 @@ async function readFile(
   module: string,
   path: string
 ): Promise<SandboxFile> {
-  const response = await fetch(
-    `/connect/${userId}/${projectId}/${module}/api/files?path=${encodeURIComponent(path)}`
-  )
+  const baseUrl = sandboxFilesUrl(userId, projectId, module)
+  const response = await fetch(`${baseUrl}?path=${encodeURIComponent(path)}`)
 
   if (!response.ok) {
     throw new Error('Failed to read file')
@@ -47,16 +45,13 @@ async function writeFile(
   path: string,
   content: string
 ): Promise<void> {
-  const response = await fetch(
-    `/connect/${userId}/${projectId}/${module}/api/files`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ path, content }),
-    }
-  )
+  const response = await fetch(sandboxFilesUrl(userId, projectId, module), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ path, content }),
+  })
 
   if (!response.ok) {
     throw new Error('Failed to write file')
