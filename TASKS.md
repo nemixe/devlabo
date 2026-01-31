@@ -9,16 +9,16 @@
 * [x] Implement security/utils.py (Path traversal validation).
 * [x] Create sandbox/image.py (Pure Modal image with Node 20 + Python 3.11).
 * [x] Set up pyproject.toml with uv-based Python environment.
-* [x] Write unit tests for security and R2 sync modules (58 tests passing).
+* [x] Write unit tests for security and R2 sync modules (109 tests passing).
 
 ## **2\. Sandbox Engine (The Body)**
 
-* \[ \] Create sandbox/instance.py (The Modal Class).  
-* \[ \] Implement ProcessManager to handle multiple subprocess.Popen calls.  
-* \[ \] Configure vite in /prototype to run on Port 3001\.  
-* \[ \] Configure vite in /frontend to run on Port 3002\.  
-* \[ \] Implement Gateway endpoint in gateway.py to route traffic.  
-* \[ \] **Milestone:** Verify you can load a "Hello World" HTML file from the Gateway URL.
+* [x] Create sandbox/instance.py (The Modal Class).
+* [x] Implement ProcessManager to handle multiple subprocess.Popen calls.
+* [x] Configure vite in /prototype to run on Port 3001\.
+* [x] Configure vite in /frontend to run on Port 3002\.
+* [x] Implement Gateway endpoint in gateway/router.py to route traffic.
+* [x] **Milestone:** Verify you can load a "Hello World" HTML file from the Gateway URL.
 
 ## **3\. AI Agent (The Brain)**
 

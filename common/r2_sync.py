@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import boto3
+import modal
 from botocore.exceptions import ClientError
 
 # Default patterns to ignore during sync
@@ -327,24 +328,30 @@ class R2Sync:
         return uploaded, downloaded, deleted
 
 
-# Modal test function for verifying R2 connection
+# Modal app for testing R2 connection
+_test_app = modal.App("r2-connection-test")
+_test_image = modal.Image.debian_slim(python_version="3.11").pip_install("boto3")
+
+
+@_test_app.function(image=_test_image, secrets=[modal.Secret.from_name("r2-secret")])
+def _test_r2_connection():
+    """Remote function that tests R2 connection with secrets."""
+    sync = R2Sync()
+    keys = sync.list_remote()
+    return len(keys), keys[:10] if keys else []
+
+
+@_test_app.local_entrypoint()
 def test_connection():
     """Test R2 connection by listing bucket contents."""
-    import modal
-
-    app = modal.App("r2-connection-test")
-
-    @app.local_entrypoint()
-    def main():
-        try:
-            sync = R2Sync()
-            keys = sync.list_remote()
-            print("Successfully connected to R2!")
-            print(f"Found {len(keys)} objects in bucket")
-            if keys:
-                print("First 10 keys:")
-                for key in keys[:10]:
-                    print(f"  - {key}")
-        except R2SyncError as e:
-            print(f"R2 connection failed: {e}")
-            raise
+    try:
+        count, sample_keys = _test_r2_connection.remote()
+        print("Successfully connected to R2!")
+        print(f"Found {count} objects in bucket")
+        if sample_keys:
+            print("First 10 keys:")
+            for key in sample_keys:
+                print(f"  - {key}")
+    except R2SyncError as e:
+        print(f"R2 connection failed: {e}")
+        raise

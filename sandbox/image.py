@@ -26,6 +26,11 @@ sandbox_image = (
     .pip_install(
         "boto3>=1.34.0",
         "watchdog>=4.0.0",
+        "fastapi>=0.109.0",
+        "httpx>=0.27.0",
+        "uvicorn>=0.27.0",
+        "websockets>=12.0",
+        "aiohttp>=3.9.0",
     )
     .env(
         {
