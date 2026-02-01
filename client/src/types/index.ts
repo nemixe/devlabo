@@ -14,8 +14,14 @@ export interface Message {
   timestamp: Date
 }
 
+export interface ChatHistoryMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 export interface AgentRequest {
   message: string
+  chat_history?: ChatHistoryMessage[]
   context?: {
     userId: string
     projectId: string

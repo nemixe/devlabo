@@ -97,14 +97,12 @@ class TestWritableScopes:
     """Tests for writable scope restrictions."""
 
     def test_writable_scopes_defined(self):
-        """WriteFileTool should have WRITABLE_SCOPES defined."""
-        from agent.tools import WriteFileTool
+        """WRITABLE_SCOPES should be defined at module level."""
+        from agent.tools import WRITABLE_SCOPES
 
-        # Access class attribute via model_fields or directly on instance
-        tool = WriteFileTool(sandbox=None)
-        assert hasattr(tool, "WRITABLE_SCOPES")
-        assert "frontend" in tool.WRITABLE_SCOPES
-        assert "dbml" in tool.WRITABLE_SCOPES
-        assert "test-case" in tool.WRITABLE_SCOPES
+        # WRITABLE_SCOPES is now a module-level constant
+        assert "frontend" in WRITABLE_SCOPES
+        assert "dbml" in WRITABLE_SCOPES
+        assert "test-case" in WRITABLE_SCOPES
         # Prototype should NOT be writable
-        assert "prototype" not in tool.WRITABLE_SCOPES
+        assert "prototype" not in WRITABLE_SCOPES

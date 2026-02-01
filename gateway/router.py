@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from sandbox.process_manager import ProcessManager
 
 logger = logging.getLogger(__name__)
@@ -270,6 +272,7 @@ class GatewayRouter:
 def create_gateway_app(
     process_manager: "ProcessManager | None" = None,
     client_timeout: float = 30.0,
+    sandbox: "Any | None" = None,
 ) -> FastAPI:
     """
     Create a FastAPI app configured as a reverse proxy gateway.
@@ -277,11 +280,13 @@ def create_gateway_app(
     Args:
         process_manager: Optional ProcessManager for health monitoring.
         client_timeout: Timeout for proxied HTTP requests.
+        sandbox: Optional ProjectSandbox reference for embedded agent chat.
 
     Returns:
         Configured FastAPI application.
     """
     router = GatewayRouter(process_manager=process_manager, client_timeout=client_timeout)
+    embedded_sandbox = sandbox  # Reference to ProjectSandbox for agent calls
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -318,28 +323,28 @@ def create_gateway_app(
     @app.post("/agent/chat")
     async def agent_chat(request: Request):
         """
-        Proxy chat requests to the AI agent.
+        Process chat requests via the embedded AI agent.
+
+        The agent runs locally inside this container with direct filesystem access,
+        eliminating RPC overhead for file operations.
 
         Expects JSON body with:
         - message: str - The user's message
-        - context: optional dict with userId, projectId, activeModule
+        - chat_history: optional list of previous messages
         """
         try:
-            import modal
-
             body = await request.json()
             message = body.get("message", "")
-            context = body.get("context", {})
+            chat_history = body.get("chat_history", None)
 
-            user_id = context.get("userId", "default")
-            project_id = context.get("projectId", "default")
+            if not embedded_sandbox:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Agent not available - sandbox not initialized"
+                )
 
-            # Get reference to the deployed DeepAgent
-            AgentCls = modal.Cls.from_name("devlabo-agent", "DeepAgent")
-            agent = AgentCls(user_id=user_id, project_id=project_id)
-
-            # Call the chat method
-            result = agent.chat.remote(message=message)
+            # Call the embedded agent's chat method (local call within container)
+            result = embedded_sandbox.chat.local(message=message, chat_history=chat_history)
 
             return {
                 "message": result.get("response", "No response"),
@@ -347,11 +352,76 @@ def create_gateway_app(
                     {"type": "file_modified", "path": f}
                     for f in result.get("files_changed", [])
                 ],
+                "error": result.get("error", False),
             }
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Agent chat error: {e}")
             raise HTTPException(status_code=500, detail=str(e)) from e
+
+    @app.get("/agent/debug")
+    async def agent_debug():
+        """Debug endpoint to check agent status."""
+        import os
+        result = {
+            "agent_initialized": embedded_sandbox._agent is not None if embedded_sandbox else False,
+            "tools_count": len(embedded_sandbox._agent_tools) if embedded_sandbox and embedded_sandbox._agent_tools else 0,
+            "openrouter_key_present": bool(os.environ.get("OPENROUTER_API_KEY")),
+            "github_token_present": bool(os.environ.get("GITHUB_TOKEN")),
+        }
+        # Check if devlabo_agent module is importable
+        try:
+            import devlabo_agent
+            result["devlabo_agent_version"] = getattr(devlabo_agent, "__version__", "unknown")
+            result["devlabo_agent_importable"] = True
+        except ImportError as e:
+            result["devlabo_agent_importable"] = False
+            result["devlabo_agent_error"] = str(e)
+
+        # Check agent install directory
+        from pathlib import Path
+        agent_dir = Path("/root/devlabo-agent")
+        result["agent_dir_exists"] = agent_dir.exists()
+        if agent_dir.exists():
+            result["agent_dir_contents"] = [str(p.name) for p in agent_dir.iterdir()]
+
+        # Check if package is in site-packages
+        import subprocess
+        pip_show = subprocess.run(
+            ["pip", "show", "devlabo-agent"],
+            capture_output=True,
+            text=True,
+        )
+        result["pip_show_returncode"] = pip_show.returncode
+        if pip_show.returncode == 0:
+            result["pip_show_output"] = pip_show.stdout[:500]
+        else:
+            result["pip_show_error"] = pip_show.stderr[:500]
+
+        # Check sys.path
+        import sys
+        result["sys_path"] = sys.path[:10]
+
+        # Check site-packages for pth files
+        import os
+        site_packages = Path("/usr/local/lib/python3.11/site-packages")
+        pth_files = list(site_packages.glob("*devlabo*"))
+        result["pth_files"] = [str(p.name) for p in pth_files]
+
+        # Try to read the pth file or egg-link
+        for pth in pth_files:
+            if pth.suffix in [".pth", ".egg-link"]:
+                result[f"{pth.name}_content"] = pth.read_text()[:200]
+
+        # Check if src is in the path
+        src_path = Path("/root/devlabo-agent/src")
+        result["src_path_exists"] = src_path.exists()
+        if src_path.exists():
+            result["src_contents"] = [str(p.name) for p in src_path.iterdir()]
+
+        return result
 
     @app.api_route(
         "/connect/{user}/{project}/{module}/{path:path}",

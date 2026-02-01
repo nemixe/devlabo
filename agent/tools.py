@@ -1,12 +1,25 @@
-"""LangChain-compatible tools for file operations via Sandbox RPC."""
+"""LangChain-compatible tools for file operations.
+
+Supports two modes:
+1. Direct mode: Tools use direct filesystem access (when running inside container)
+2. RPC mode: Tools use Sandbox RPC calls (when running outside container)
+"""
 
 import logging
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from security.utils import get_scoped_path
+
 logger = logging.getLogger(__name__)
+
+# Scopes the agent is allowed to write to
+WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
 
 
 class ReadFileInput(BaseModel):
@@ -27,18 +40,32 @@ class ReadFileTool(BaseTool):
         "'frontend' for generated code, 'dbml' for database schemas, 'test-case' for tests."
     )
     args_schema: type[BaseModel] = ReadFileInput
-    sandbox: Any = None
+
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, scope: str, path: str) -> str:
-        """Read file via Sandbox RPC."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
-        try:
-            return self.sandbox.read_file.remote(scope=scope, relative_path=path)
-        except FileNotFoundError:
-            return f"Error: File '{path}' not found in scope '{scope}'"
-        except Exception as e:
-            return f"Error reading file: {e}"
+        """Read file via direct access or Sandbox RPC."""
+        if self.workspace:
+            # Direct mode - read from filesystem
+            try:
+                validated_path = get_scoped_path(self.workspace, scope, path)
+                return Path(validated_path).read_text()
+            except FileNotFoundError:
+                return f"Error: File '{path}' not found in scope '{scope}'"
+            except Exception as e:
+                return f"Error reading file: {e}"
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                return self.sandbox.read_file.remote(scope=scope, relative_path=path)
+            except FileNotFoundError:
+                return f"Error: File '{path}' not found in scope '{scope}'"
+            except Exception as e:
+                return f"Error reading file: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
 
 
 class WriteFileInput(BaseModel):
@@ -62,25 +89,36 @@ class WriteFileTool(BaseTool):
         "Note: 'prototype' is read-only and cannot be written to by the agent."
     )
     args_schema: type[BaseModel] = WriteFileInput
-    sandbox: Any = None
 
-    # Scopes the agent is allowed to write to
-    WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, scope: str, path: str, content: str) -> str:
-        """Write file via Sandbox RPC. CloudBucketMount handles R2 persistence."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
-
+        """Write file via direct access or Sandbox RPC."""
         # Prevent writing to prototype (read-only source of truth)
-        if scope not in self.WRITABLE_SCOPES:
-            return f"Error: Cannot write to scope '{scope}'. Writable scopes: {', '.join(sorted(self.WRITABLE_SCOPES))}"
+        if scope not in WRITABLE_SCOPES:
+            return f"Error: Cannot write to scope '{scope}'. Writable scopes: {', '.join(sorted(WRITABLE_SCOPES))}"
 
-        try:
-            self.sandbox.write_file.remote(scope=scope, relative_path=path, content=content)
-            return f"Successfully wrote '{path}' to scope '{scope}'"
-        except Exception as e:
-            return f"Error writing file: {e}"
+        if self.workspace:
+            # Direct mode - write to filesystem
+            try:
+                validated_path = get_scoped_path(self.workspace, scope, path)
+                path_obj = Path(validated_path)
+                path_obj.parent.mkdir(parents=True, exist_ok=True)
+                path_obj.write_text(content)
+                return f"Successfully wrote '{path}' to scope '{scope}'"
+            except Exception as e:
+                return f"Error writing file: {e}"
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                self.sandbox.write_file.remote(scope=scope, relative_path=path, content=content)
+                return f"Successfully wrote '{path}' to scope '{scope}'"
+            except Exception as e:
+                return f"Error writing file: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
 
 
 class ListFilesInput(BaseModel):
@@ -100,19 +138,36 @@ class ListFilesTool(BaseTool):
         "Available scopes: prototype (source), frontend (generated), dbml (schemas), test-case (tests)."
     )
     args_schema: type[BaseModel] = ListFilesInput
-    sandbox: Any = None
+
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, scope: str) -> str:
-        """List files via Sandbox RPC."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
-        try:
-            files = self.sandbox.list_files.remote(scope=scope)
-            if not files:
-                return f"No files found in scope '{scope}'"
-            return f"Files in '{scope}':\n" + "\n".join(f"  - {f}" for f in sorted(files))
-        except Exception as e:
-            return f"Error listing files: {e}"
+        """List files via direct access or Sandbox RPC."""
+        if self.workspace:
+            # Direct mode - list from filesystem
+            try:
+                scope_path = Path(self.workspace) / scope
+                if not scope_path.exists():
+                    return f"No files found in scope '{scope}'"
+                files = [str(f.relative_to(scope_path)) for f in scope_path.rglob("*") if f.is_file()]
+                if not files:
+                    return f"No files found in scope '{scope}'"
+                return f"Files in '{scope}':\n" + "\n".join(f"  - {f}" for f in sorted(files))
+            except Exception as e:
+                return f"Error listing files: {e}"
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                files = self.sandbox.list_files.remote(scope=scope)
+                if not files:
+                    return f"No files found in scope '{scope}'"
+                return f"Files in '{scope}':\n" + "\n".join(f"  - {f}" for f in sorted(files))
+            except Exception as e:
+                return f"Error listing files: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
 
 
 class DeleteFileInput(BaseModel):
@@ -135,26 +190,38 @@ class DeleteFileTool(BaseTool):
         "Note: 'prototype' is read-only and files cannot be deleted from it."
     )
     args_schema: type[BaseModel] = DeleteFileInput
-    sandbox: Any = None
 
-    # Scopes the agent is allowed to delete from
-    WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, scope: str, path: str) -> str:
-        """Delete file via Sandbox RPC. CloudBucketMount handles R2 persistence."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
+        """Delete file via direct access or Sandbox RPC."""
+        if scope not in WRITABLE_SCOPES:
+            return f"Error: Cannot delete from scope '{scope}'. Writable scopes: {', '.join(sorted(WRITABLE_SCOPES))}"
 
-        if scope not in self.WRITABLE_SCOPES:
-            return f"Error: Cannot delete from scope '{scope}'. Writable scopes: {', '.join(sorted(self.WRITABLE_SCOPES))}"
-
-        try:
-            self.sandbox.delete_file.remote(scope=scope, relative_path=path)
-            return f"Successfully deleted '{path}' from scope '{scope}'"
-        except FileNotFoundError:
-            return f"Error: File '{path}' not found in scope '{scope}'"
-        except Exception as e:
-            return f"Error deleting file: {e}"
+        if self.workspace:
+            # Direct mode - delete from filesystem
+            try:
+                validated_path = get_scoped_path(self.workspace, scope, path)
+                path_obj = Path(validated_path)
+                if not path_obj.exists():
+                    return f"Error: File '{path}' not found in scope '{scope}'"
+                path_obj.unlink()
+                return f"Successfully deleted '{path}' from scope '{scope}'"
+            except Exception as e:
+                return f"Error deleting file: {e}"
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                self.sandbox.delete_file.remote(scope=scope, relative_path=path)
+                return f"Successfully deleted '{path}' from scope '{scope}'"
+            except FileNotFoundError:
+                return f"Error: File '{path}' not found in scope '{scope}'"
+            except Exception as e:
+                return f"Error deleting file: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
 
 
 class DeleteFilesInput(BaseModel):
@@ -177,40 +244,56 @@ class DeleteFilesTool(BaseTool):
         "Note: 'prototype' is read-only."
     )
     args_schema: type[BaseModel] = DeleteFilesInput
-    sandbox: Any = None
 
-    # Scopes the agent is allowed to delete from
-    WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, scope: str, paths: list[str]) -> str:
-        """Bulk delete files via Sandbox RPC."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
-
-        if scope not in self.WRITABLE_SCOPES:
-            return f"Error: Cannot delete from scope '{scope}'. Writable scopes: {', '.join(sorted(self.WRITABLE_SCOPES))}"
+        """Bulk delete files via direct access or Sandbox RPC."""
+        if scope not in WRITABLE_SCOPES:
+            return f"Error: Cannot delete from scope '{scope}'. Writable scopes: {', '.join(sorted(WRITABLE_SCOPES))}"
 
         if not paths:
             return "Error: No paths specified"
 
-        try:
-            result = self.sandbox.delete_files.remote(scope=scope, paths=paths)
-            succeeded = result.get("succeeded", [])
-            failed = result.get("failed", [])
+        if self.workspace:
+            # Direct mode - delete from filesystem
+            succeeded = []
+            failed = []
+            for p in paths:
+                try:
+                    validated_path = get_scoped_path(self.workspace, scope, p)
+                    path_obj = Path(validated_path)
+                    if not path_obj.exists():
+                        failed.append({"path": p, "error": "File not found"})
+                    else:
+                        path_obj.unlink()
+                        succeeded.append(p)
+                except Exception as e:
+                    failed.append({"path": p, "error": str(e)})
+            return self._format_bulk_result(succeeded, failed)
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                result = self.sandbox.delete_files.remote(scope=scope, paths=paths)
+                return self._format_bulk_result(result.get("succeeded", []), result.get("failed", []))
+            except Exception as e:
+                return f"Error during bulk delete: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
 
-            output = []
-            if succeeded:
-                output.append(f"Successfully deleted {len(succeeded)} file(s):")
-                for p in succeeded:
-                    output.append(f"  - '{p}'")
-            if failed:
-                output.append(f"Failed to delete {len(failed)} file(s):")
-                for f in failed:
-                    output.append(f"  - '{f['path']}': {f['error']}")
-
-            return "\n".join(output) if output else "No files processed"
-        except Exception as e:
-            return f"Error during bulk delete: {e}"
+    def _format_bulk_result(self, succeeded: list, failed: list) -> str:
+        output = []
+        if succeeded:
+            output.append(f"Successfully deleted {len(succeeded)} file(s):")
+            for p in succeeded:
+                output.append(f"  - '{p}'")
+        if failed:
+            output.append(f"Failed to delete {len(failed)} file(s):")
+            for f in failed:
+                output.append(f"  - '{f['path']}': {f['error']}")
+        return "\n".join(output) if output else "No files processed"
 
 
 class RenameFileInput(BaseModel):
@@ -235,26 +318,53 @@ class RenameFileTool(BaseTool):
         "Note: 'prototype' is read-only."
     )
     args_schema: type[BaseModel] = RenameFileInput
-    sandbox: Any = None
 
-    # Scopes the agent is allowed to rename in
-    WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, scope: str, old_path: str, new_path: str) -> str:
-        """Rename file via Sandbox RPC. CloudBucketMount handles R2 persistence."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
+        """Rename file via direct access or Sandbox RPC."""
+        if scope not in WRITABLE_SCOPES:
+            return f"Error: Cannot rename in scope '{scope}'. Writable scopes: {', '.join(sorted(WRITABLE_SCOPES))}"
 
-        if scope not in self.WRITABLE_SCOPES:
-            return f"Error: Cannot rename in scope '{scope}'. Writable scopes: {', '.join(sorted(self.WRITABLE_SCOPES))}"
+        if self.workspace:
+            # Direct mode - rename on filesystem
+            # Note: S3 Mountpoint doesn't support rename, use copy+delete
+            try:
+                validated_old = get_scoped_path(self.workspace, scope, old_path)
+                validated_new = get_scoped_path(self.workspace, scope, new_path)
+                old_file = Path(validated_old)
+                new_file = Path(validated_new)
 
-        try:
-            self.sandbox.rename_file.remote(scope=scope, old_path=old_path, new_path=new_path)
-            return f"Successfully renamed '{old_path}' to '{new_path}' in scope '{scope}'"
-        except FileNotFoundError:
-            return f"Error: File '{old_path}' not found in scope '{scope}'"
-        except Exception as e:
-            return f"Error renaming file: {e}"
+                if not old_file.exists():
+                    return f"Error: File '{old_path}' not found in scope '{scope}'"
+
+                new_file.parent.mkdir(parents=True, exist_ok=True)
+                # Use copy+delete for S3 Mountpoint compatibility
+                shutil.copy2(old_file, new_file)
+                old_file.unlink()
+
+                # Verify the rename succeeded
+                if not new_file.exists():
+                    return f"Error: Rename failed - '{new_path}' was not created"
+                if old_file.exists():
+                    return f"Error: Rename failed - '{old_path}' still exists after delete"
+
+                return f"Successfully renamed '{old_path}' to '{new_path}' in scope '{scope}'"
+            except Exception as e:
+                return f"Error renaming file: {e}"
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                self.sandbox.rename_file.remote(scope=scope, old_path=old_path, new_path=new_path)
+                return f"Successfully renamed '{old_path}' to '{new_path}' in scope '{scope}'"
+            except FileNotFoundError:
+                return f"Error: File '{old_path}' not found in scope '{scope}'"
+            except Exception as e:
+                return f"Error renaming file: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
 
 
 class RenameFilesInput(BaseModel):
@@ -280,40 +390,62 @@ class RenameFilesTool(BaseTool):
         "Note: 'prototype' is read-only."
     )
     args_schema: type[BaseModel] = RenameFilesInput
-    sandbox: Any = None
 
-    # Scopes the agent is allowed to rename in
-    WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, scope: str, renames: list[tuple[str, str]]) -> str:
-        """Bulk rename files via Sandbox RPC."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
-
-        if scope not in self.WRITABLE_SCOPES:
-            return f"Error: Cannot rename in scope '{scope}'. Writable scopes: {', '.join(sorted(self.WRITABLE_SCOPES))}"
+        """Bulk rename files via direct access or Sandbox RPC."""
+        if scope not in WRITABLE_SCOPES:
+            return f"Error: Cannot rename in scope '{scope}'. Writable scopes: {', '.join(sorted(WRITABLE_SCOPES))}"
 
         if not renames:
             return "Error: No renames specified"
 
-        try:
-            result = self.sandbox.rename_files.remote(scope=scope, renames=renames)
-            succeeded = result.get("succeeded", [])
-            failed = result.get("failed", [])
+        if self.workspace:
+            # Direct mode - rename on filesystem
+            succeeded = []
+            failed = []
+            for old_path, new_path in renames:
+                try:
+                    validated_old = get_scoped_path(self.workspace, scope, old_path)
+                    validated_new = get_scoped_path(self.workspace, scope, new_path)
+                    old_file = Path(validated_old)
+                    new_file = Path(validated_new)
 
-            output = []
-            if succeeded:
-                output.append(f"Successfully renamed {len(succeeded)} file(s):")
-                for old, new in succeeded:
-                    output.append(f"  - '{old}' -> '{new}'")
-            if failed:
-                output.append(f"Failed to rename {len(failed)} file(s):")
-                for f in failed:
-                    output.append(f"  - '{f['old_path']}': {f['error']}")
+                    if not old_file.exists():
+                        failed.append({"old_path": old_path, "error": "File not found"})
+                        continue
 
-            return "\n".join(output) if output else "No files processed"
-        except Exception as e:
-            return f"Error during bulk rename: {e}"
+                    new_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(old_file, new_file)
+                    old_file.unlink()
+                    succeeded.append((old_path, new_path))
+                except Exception as e:
+                    failed.append({"old_path": old_path, "new_path": new_path, "error": str(e)})
+            return self._format_bulk_result(succeeded, failed)
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                result = self.sandbox.rename_files.remote(scope=scope, renames=renames)
+                return self._format_bulk_result(result.get("succeeded", []), result.get("failed", []))
+            except Exception as e:
+                return f"Error during bulk rename: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
+
+    def _format_bulk_result(self, succeeded: list, failed: list) -> str:
+        output = []
+        if succeeded:
+            output.append(f"Successfully renamed {len(succeeded)} file(s):")
+            for old, new in succeeded:
+                output.append(f"  - '{old}' -> '{new}'")
+        if failed:
+            output.append(f"Failed to rename {len(failed)} file(s):")
+            for f in failed:
+                output.append(f"  - '{f['old_path']}': {f['error']}")
+        return "\n".join(output) if output else "No files processed"
 
 
 class RunCommandInput(BaseModel):
@@ -341,31 +473,89 @@ class RunCommandTool(BaseTool):
         "Available directories: prototype (read-only), frontend, dbml, test-case."
     )
     args_schema: type[BaseModel] = RunCommandInput
-    sandbox: Any = None
+
+    # One of these must be set
+    workspace: str | None = None  # For direct mode
+    sandbox: Any = None  # For RPC mode
 
     def _run(self, command: str, cwd: str | None = None) -> str:
-        """Run command via Sandbox RPC."""
-        if self.sandbox is None:
-            return "Error: Sandbox not initialized"
+        """Run command via direct execution or Sandbox RPC."""
+        if self.workspace:
+            # Direct mode - run locally
+            try:
+                work_dir = Path(self.workspace)
+                if cwd:
+                    work_dir = work_dir / cwd
+                    # Security: ensure we stay within workspace
+                    if not str(work_dir.resolve()).startswith(self.workspace):
+                        return "Error: Cannot execute outside workspace"
 
-        try:
-            result = self.sandbox.run_command.remote(command=command, cwd=cwd)
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=str(work_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
 
-            output = []
-            if result["stdout"]:
-                output.append(f"stdout:\n{result['stdout']}")
-            if result["stderr"]:
-                output.append(f"stderr:\n{result['stderr']}")
-            output.append(f"exit code: {result['returncode']}")
+                output = []
+                if result.stdout:
+                    output.append(f"stdout:\n{result.stdout}")
+                if result.stderr:
+                    output.append(f"stderr:\n{result.stderr}")
+                output.append(f"exit code: {result.returncode}")
+                return "\n".join(output) if output else "Command completed with no output"
+            except subprocess.TimeoutExpired:
+                return "Error: Command timed out after 30 seconds"
+            except Exception as e:
+                return f"Error running command: {e}"
+        elif self.sandbox:
+            # RPC mode - call sandbox
+            try:
+                result = self.sandbox.run_command.remote(command=command, cwd=cwd)
+                output = []
+                if result["stdout"]:
+                    output.append(f"stdout:\n{result['stdout']}")
+                if result["stderr"]:
+                    output.append(f"stderr:\n{result['stderr']}")
+                output.append(f"exit code: {result['returncode']}")
+                return "\n".join(output) if output else "Command completed with no output"
+            except Exception as e:
+                return f"Error running command: {e}"
+        else:
+            return "Error: Tool not configured (no workspace or sandbox)"
 
-            return "\n".join(output) if output else "Command completed with no output"
-        except Exception as e:
-            return f"Error running command: {e}"
 
-
-def create_tools(sandbox: Any) -> list[BaseTool]:
+def create_direct_tools(workspace: str) -> list[BaseTool]:
     """
-    Create all agent tools configured with the given sandbox.
+    Create all agent tools configured for direct filesystem access.
+
+    Use this when running inside the container with direct access to the workspace.
+
+    Args:
+        workspace: Path to the workspace directory (e.g., "/root/workspace/user/project").
+
+    Returns:
+        List of configured LangChain tools.
+    """
+    return [
+        ReadFileTool(workspace=workspace),
+        WriteFileTool(workspace=workspace),
+        ListFilesTool(workspace=workspace),
+        DeleteFileTool(workspace=workspace),
+        DeleteFilesTool(workspace=workspace),
+        RenameFileTool(workspace=workspace),
+        RenameFilesTool(workspace=workspace),
+        RunCommandTool(workspace=workspace),
+    ]
+
+
+def create_rpc_tools(sandbox: Any) -> list[BaseTool]:
+    """
+    Create all agent tools configured for Sandbox RPC access.
+
+    Use this when running outside the container and need to use RPC calls.
 
     Args:
         sandbox: A Modal Sandbox reference for RPC calls.
@@ -383,3 +573,28 @@ def create_tools(sandbox: Any) -> list[BaseTool]:
         RenameFilesTool(sandbox=sandbox),
         RunCommandTool(sandbox=sandbox),
     ]
+
+
+def create_tools(*, workspace: str | None = None, sandbox: Any = None) -> list[BaseTool]:
+    """
+    Create all agent tools in direct mode (workspace) or RPC mode (sandbox).
+
+    Args:
+        workspace: Path for direct filesystem access (inside container).
+        sandbox: Modal sandbox reference for RPC access (outside container).
+
+    Returns:
+        List of configured LangChain tools.
+
+    Raises:
+        ValueError: If both or neither parameters are provided.
+    """
+    if workspace and sandbox:
+        raise ValueError("Specify workspace OR sandbox, not both")
+
+    if workspace:
+        return create_direct_tools(workspace)
+    elif sandbox:
+        return create_rpc_tools(sandbox)
+    else:
+        raise ValueError("Must specify workspace or sandbox")

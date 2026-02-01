@@ -23,8 +23,11 @@ sandbox_image = (
         "npm install -g pnpm",
         # Install global dev tools
         "npm install -g vite vitest create-vite",
+        # Install uv for fast Python package installation (used for dynamic agent loading)
+        "curl -LsSf https://astral.sh/uv/install.sh | sh",
     )
     .pip_install(
+        # Sandbox dependencies
         "boto3>=1.34.0",
         "watchdog>=4.0.0",
         "fastapi>=0.109.0",
@@ -32,6 +35,11 @@ sandbox_image = (
         "uvicorn>=0.27.0",
         "websockets>=12.0",
         "aiohttp>=3.9.0",
+        # Agent dependencies (embedded agent)
+        "langchain-core>=0.3.0",
+        "langchain-openai>=0.3.0",
+        "langgraph>=0.2.0",
+        "openai>=1.0.0",
     )
     .env(
         {
@@ -39,6 +47,8 @@ sandbox_image = (
             "PNPM_HOME": "/root/.local/share/pnpm",
             # Ensure Node.js uses UTF-8
             "NODE_OPTIONS": "--max-old-space-size=4096",
+            # Add uv to PATH for dynamic agent installation
+            "PATH": "/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
         }
     )
 )

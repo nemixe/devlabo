@@ -3,6 +3,8 @@
 import logging
 import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import modal
@@ -14,9 +16,15 @@ from security.utils import get_scoped_path
 logger = logging.getLogger(__name__)
 
 # Extend sandbox image to include local Python packages
+# Note: 'agent' is NOT bundled - it's dynamically loaded at container startup
 sandbox_image_with_packages = sandbox_image.add_local_python_source(
     "common", "gateway", "sandbox", "security"
 )
+
+# Agent installation configuration
+AGENT_INSTALL_DIR = "/root/devlabo-agent"
+DEFAULT_AGENT_REPO_URL = "https://github.com/nemixe/devlabo-agent.git"
+DEFAULT_AGENT_BRANCH = "main"
 
 # Import from local packages (after image is set up, these are runtime imports)
 from gateway.router import MODULE_PORTS, create_gateway_app
@@ -30,31 +38,25 @@ WORKSPACE_ROOT = "/root/workspace"
 WORKSPACE_DIRS = ["prototype", "frontend", "dbml", "test-case"]
 
 # R2 configuration
-# Read endpoint URL from environment (set in .env or Modal secret)
-# Format: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "devlabo")
-R2_ENDPOINT_URL = os.environ.get("R2_ENDPOINT_URL")
+R2_BUCKET_NAME = "devlabo"
+R2_ENDPOINT_URL = "https://31c75feb9bd6603a742cb349c7ef770c.r2.cloudflarestorage.com"
 
 # R2 secret with credentials (must have AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
 r2_secret = modal.Secret.from_name("r2-secret")
 
+# OpenRouter secret for AI agent (must have OPENROUTER_API_KEY)
+openrouter_secret = modal.Secret.from_name("openrouter-secret")
+
+# GitHub secret for private agent repos (must have GITHUB_TOKEN)
+github_secret = modal.Secret.from_name("github-secret")
+
 # CloudBucketMount for R2 persistence
 # All file operations automatically persist to R2 - no explicit sync needed
-# bucket_endpoint_url must be set via R2_ENDPOINT_URL environment variable before deploy
-if R2_ENDPOINT_URL:
-    r2_mount = modal.CloudBucketMount(
-        bucket_name=R2_BUCKET_NAME,
-        bucket_endpoint_url=R2_ENDPOINT_URL,
-        secret=r2_secret,
-    )
-else:
-    # CloudBucketMount not configured - will use local filesystem only
-    # Set R2_ENDPOINT_URL in your environment before deploying
-    r2_mount = None
-    logger.warning(
-        "R2_ENDPOINT_URL not set. CloudBucketMount disabled. "
-        "Files will not persist across container restarts."
-    )
+r2_mount = modal.CloudBucketMount(
+    bucket_name=R2_BUCKET_NAME,
+    bucket_endpoint_url=R2_ENDPOINT_URL,
+    secret=r2_secret,
+)
 
 # Default user/project for the ASGI web endpoint
 DEFAULT_USER_ID = "default"
@@ -111,9 +113,10 @@ def get_default_process_configs() -> list[ProcessConfig]:
 
 @app.cls(
     image=sandbox_image_with_packages,
-    volumes={WORKSPACE_ROOT: r2_mount} if r2_mount else {},
+    volumes={WORKSPACE_ROOT: r2_mount},
+    secrets=[openrouter_secret, github_secret],
     timeout=3600,  # 1 hour max lifetime
-    scaledown_window=300,  # 5 min idle timeout (renamed from container_idle_timeout)
+    scaledown_window=300,  # 5 min idle timeout
 )
 @modal.concurrent(max_inputs=100)
 class ProjectSandbox:
@@ -137,30 +140,41 @@ class ProjectSandbox:
         """
         Container startup lifecycle hook.
 
-        1. Creates workspace directories (backed by R2 via CloudBucketMount)
-        2. Sets up scaffold files if directories are empty
-        3. Starts all dev server processes
+        1. Installs agent from git repository (dynamic loading)
+        2. Creates workspace directories (backed by R2 via CloudBucketMount)
+        3. Sets up scaffold files if directories are empty
+        4. Starts all dev server processes
+        5. Initializes AI agent with dynamically loaded code
         """
         # Workspace is backed by R2 via CloudBucketMount - no pull needed
         self.workspace = f"{WORKSPACE_ROOT}/{self.user_id}/{self.project_id}"
         self._process_manager: ProcessManager | None = None
+        self._agent = None
+        self._agent_tools = None
 
         logger.info(f"Starting sandbox for {self.user_id}/{self.project_id}")
 
-        # 1. Create workspace directories (persisted to R2 automatically)
+        # 1. Install agent from git repository (dynamic loading)
+        self._install_agent()
+
+        # 2. Create workspace directories (persisted to R2 automatically)
         self._create_workspace_dirs()
 
-        # 2. Set up scaffold files for empty directories
+        # 3. Set up scaffold files for empty directories
         self._setup_scaffolds()
 
-        # 3. Initialize and start ProcessManager
+        # 4. Initialize and start ProcessManager
         self._start_processes()
 
-        # 4. Create gateway app
+        # 5. Create gateway app (pass self reference for agent chat)
         self._gateway_app = create_gateway_app(
             process_manager=self._process_manager,
             client_timeout=30.0,
+            sandbox=self,  # Pass self for embedded agent
         )
+
+        # 6. Initialize AI agent with dynamically loaded code
+        self._init_agent()
 
         logger.info("Sandbox startup complete")
 
@@ -319,6 +333,223 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
                 logger.info(f"Process '{name}': {status}")
         finally:
             loop.close()
+
+    def _install_agent(self) -> None:
+        """
+        Clone/update agent repo and install as editable package.
+
+        This enables dynamic agent updates without redeploying the sandbox.
+        The agent code is cloned from a git repository at container startup.
+        """
+        repo_url = os.environ.get("AGENT_REPO_URL", DEFAULT_AGENT_REPO_URL)
+        branch = os.environ.get("AGENT_REPO_BRANCH", DEFAULT_AGENT_BRANCH)
+        github_token = os.environ.get("GITHUB_TOKEN")
+
+        agent_dir = Path(AGENT_INSTALL_DIR)
+
+        # Log token status (without revealing the token)
+        logger.info(f"GITHUB_TOKEN present: {bool(github_token)}")
+
+        # Add token to URL for private repos
+        clone_url = repo_url
+        if github_token and "github.com" in repo_url:
+            clone_url = repo_url.replace("https://", f"https://{github_token}@")
+            logger.info("Using authenticated URL for private repo")
+
+        try:
+            if agent_dir.exists():
+                # Update existing clone
+                logger.info(f"Updating agent from {branch} branch...")
+                result = subprocess.run(
+                    ["git", "fetch", "origin"],
+                    cwd=str(agent_dir),
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    logger.error(f"git fetch failed: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, "git fetch", result.stderr)
+
+                result = subprocess.run(
+                    ["git", "reset", "--hard", f"origin/{branch}"],
+                    cwd=str(agent_dir),
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    logger.error(f"git reset failed: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, "git reset", result.stderr)
+            else:
+                # Fresh clone
+                logger.info(f"Cloning agent repo (branch: {branch})...")
+                result = subprocess.run(
+                    ["git", "clone", "--depth", "1", "-b", branch, clone_url, str(agent_dir)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    logger.error(f"git clone failed: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, "git clone", result.stderr)
+                logger.info("Clone successful")
+
+            # Verify the clone worked
+            if not (agent_dir / "pyproject.toml").exists():
+                logger.error(f"Clone seems incomplete - pyproject.toml not found in {agent_dir}")
+                return
+
+            # Install with uv (fast) or pip (fallback)
+            logger.info("Installing agent package...")
+            try:
+                result = subprocess.run(
+                    ["uv", "pip", "install", "--system", "-e", str(agent_dir)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    logger.error(f"uv pip install failed: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, "uv pip install", result.stderr)
+                logger.info(f"Agent installed with uv from {branch} branch")
+            except FileNotFoundError:
+                # Fallback to pip if uv is not available
+                logger.info("uv not found, falling back to pip...")
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-e", str(agent_dir)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    logger.error(f"pip install failed: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, "pip install", result.stderr)
+                logger.info(f"Agent installed with pip from {branch} branch")
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to install agent: {e}")
+            logger.warning("Agent will not be available for this session")
+        except Exception as e:
+            logger.error(f"Failed to install agent: {e}")
+            logger.warning("Agent will not be available for this session")
+
+    def _init_agent(self) -> None:
+        """Initialize AI agent with dynamically loaded code."""
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            logger.warning("OPENROUTER_API_KEY not found - agent disabled")
+            return
+
+        # Add agent source to sys.path (Modal doesn't process .pth files)
+        agent_src = Path(AGENT_INSTALL_DIR) / "src"
+        if agent_src.exists() and str(agent_src) not in sys.path:
+            sys.path.insert(0, str(agent_src))
+            logger.info(f"Added {agent_src} to sys.path")
+
+        try:
+            # Import from dynamically installed package
+            from devlabo_agent.prompts import SYSTEM_PROMPT
+            from devlabo_agent.tools import create_direct_tools
+        except ImportError as e:
+            logger.error(f"Agent module not found (dynamic install may have failed): {e}")
+            self._agent = None
+            return
+
+        try:
+            from langchain_core.messages import SystemMessage
+            from langchain_openai import ChatOpenAI
+            from langgraph.prebuilt import create_react_agent
+
+            # Initialize OpenRouter-compatible LLM
+            llm = ChatOpenAI(
+                model="anthropic/claude-sonnet-4",
+                openai_api_key=api_key,
+                openai_api_base="https://openrouter.ai/api/v1",
+                temperature=0.1,
+                max_tokens=4096,
+            )
+
+            # Create tools with direct filesystem access (no RPC)
+            self._agent_tools = create_direct_tools(self.workspace)
+
+            # Create the agent using langgraph's create_react_agent
+            self._agent = create_react_agent(
+                llm,
+                self._agent_tools,
+                prompt=SystemMessage(content=SYSTEM_PROMPT),
+            )
+
+            logger.info(f"Agent initialized with {len(self._agent_tools)} tools (dynamic mode)")
+        except Exception as e:
+            logger.error(f"Failed to initialize agent: {e}")
+            self._agent = None
+
+    def _get_changed_files(self) -> list[str]:
+        """Get list of files in writable scopes (for tracking changes)."""
+        changed = []
+        for scope in ["frontend", "dbml", "test-case"]:
+            scope_path = Path(self.workspace) / scope
+            if scope_path.exists():
+                for f in scope_path.rglob("*"):
+                    if f.is_file():
+                        changed.append(f"{scope}/{f.relative_to(scope_path)}")
+        return changed
+
+    @modal.method()
+    def chat(self, message: str, chat_history: list[dict] | None = None) -> dict:
+        """
+        Process a user message via the embedded AI agent.
+
+        Args:
+            message: The user's message/prompt.
+            chat_history: Optional list of previous messages for context.
+
+        Returns:
+            Dict with 'response', 'files_changed', and 'error' keys.
+        """
+        if not self._agent:
+            return {
+                "response": "Error: Agent not initialized. Check API key configuration.",
+                "files_changed": [],
+                "error": True,
+            }
+
+        try:
+            from langchain_core.messages import AIMessage, HumanMessage
+
+            # Build messages list
+            messages = []
+
+            # Add chat history if provided
+            if chat_history:
+                for msg in chat_history:
+                    if msg.get("role") == "user":
+                        messages.append(HumanMessage(content=msg["content"]))
+                    elif msg.get("role") == "assistant":
+                        messages.append(AIMessage(content=msg["content"]))
+
+            # Add current message
+            messages.append(HumanMessage(content=message))
+
+            # Invoke the agent
+            result = self._agent.invoke({"messages": messages})
+
+            # Extract the final response from the agent
+            final_messages = result.get("messages", [])
+            response_text = ""
+            for msg in reversed(final_messages):
+                if isinstance(msg, AIMessage) and msg.content:
+                    response_text = msg.content
+                    break
+
+            return {
+                "response": response_text or "No response generated",
+                "files_changed": self._get_changed_files(),
+                "error": False,
+            }
+        except Exception as e:
+            logger.error(f"Agent error: {e}")
+            return {
+                "response": f"Error processing request: {e}",
+                "files_changed": [],
+                "error": True,
+            }
 
     @modal.method()
     def get_status(self) -> dict:

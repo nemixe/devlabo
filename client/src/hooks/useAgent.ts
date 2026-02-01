@@ -1,11 +1,12 @@
 import { useMutation } from '@tanstack/react-query'
 import { agentChatUrl } from '@/lib/api'
-import type { ModuleType, AgentRequest, AgentResponse } from '@/types'
+import type { ModuleType, AgentRequest, AgentResponse, Message } from '@/types'
 
 interface UseAgentOptions {
   userId: string
   projectId: string
   activeModule: ModuleType
+  chatHistory?: Message[]
   onSuccess?: (response: AgentResponse) => void
   onError?: (error: Error) => void
 }
@@ -31,6 +32,7 @@ export function useAgent({
   userId,
   projectId,
   activeModule,
+  chatHistory,
   onSuccess,
   onError,
 }: UseAgentOptions) {
@@ -38,6 +40,10 @@ export function useAgent({
     mutationFn: (message: string) =>
       sendAgentMessage({
         message,
+        chat_history: chatHistory?.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
         context: {
           userId,
           projectId,

@@ -90,8 +90,8 @@ class DeepAgent:
             max_tokens=4096,
         )
 
-        # Create tools with sandbox reference
-        self.tools = create_tools(self.sandbox) if self.sandbox else []
+        # Create tools with sandbox reference (RPC mode)
+        self.tools = create_tools(sandbox=self.sandbox) if self.sandbox else []
 
         # Create the agent using langgraph's create_react_agent
         self.agent = create_react_agent(

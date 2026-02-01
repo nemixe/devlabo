@@ -11,6 +11,8 @@ from agent.tools import (
     RenameFilesTool,
     RunCommandTool,
     WriteFileTool,
+    create_direct_tools,
+    create_rpc_tools,
     create_tools,
 )
 
@@ -152,12 +154,12 @@ class TestReadFileTool:
         assert "Error" in result
         assert "not found" in result
 
-    def test_read_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = ReadFileTool(sandbox=None)
+    def test_read_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = ReadFileTool()
         result = tool._run(scope="prototype", path="index.html")
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestWriteFileTool:
@@ -192,12 +194,12 @@ class TestWriteFileTool:
         # Ensure file was not written
         assert "hack.html" not in mock_sandbox.files["prototype"]
 
-    def test_write_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = WriteFileTool(sandbox=None)
+    def test_write_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = WriteFileTool()
         result = tool._run(scope="frontend", path="test.txt", content="content")
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestListFilesTool:
@@ -215,12 +217,12 @@ class TestListFilesTool:
         result = tool._run(scope="dbml")
         assert "No files found" in result
 
-    def test_list_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = ListFilesTool(sandbox=None)
+    def test_list_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = ListFilesTool()
         result = tool._run(scope="prototype")
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestDeleteFileTool:
@@ -251,12 +253,12 @@ class TestDeleteFileTool:
         # Ensure file was not deleted
         assert "index.html" in mock_sandbox.files["prototype"]
 
-    def test_delete_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = DeleteFileTool(sandbox=None)
+    def test_delete_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = DeleteFileTool()
         result = tool._run(scope="frontend", path="test.txt")
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestRenameFileTool:
@@ -287,12 +289,12 @@ class TestRenameFileTool:
         # Ensure file was not renamed
         assert "index.html" in mock_sandbox.files["prototype"]
 
-    def test_rename_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = RenameFileTool(sandbox=None)
+    def test_rename_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = RenameFileTool()
         result = tool._run(scope="frontend", old_path="a.txt", new_path="b.txt")
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestDeleteFilesTool:
@@ -326,12 +328,12 @@ class TestDeleteFilesTool:
         assert "Error" in result
         assert "Cannot delete from scope 'prototype'" in result
 
-    def test_delete_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = DeleteFilesTool(sandbox=None)
+    def test_delete_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = DeleteFilesTool()
         result = tool._run(scope="frontend", paths=["test.txt"])
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestRenameFilesTool:
@@ -371,12 +373,12 @@ class TestRenameFilesTool:
         assert "Error" in result
         assert "Cannot rename in scope 'prototype'" in result
 
-    def test_rename_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = RenameFilesTool(sandbox=None)
+    def test_rename_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = RenameFilesTool()
         result = tool._run(scope="frontend", renames=[("a.txt", "b.txt")])
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestRunCommandTool:
@@ -395,20 +397,20 @@ class TestRunCommandTool:
         result = tool._run(command="pwd", cwd="frontend")
         assert "exit code: 0" in result
 
-    def test_run_command_no_sandbox(self):
-        """Should return error if sandbox not initialized."""
-        tool = RunCommandTool(sandbox=None)
+    def test_run_command_no_sandbox_or_workspace(self):
+        """Should return error if neither sandbox nor workspace configured."""
+        tool = RunCommandTool()
         result = tool._run(command="ls")
         assert "Error" in result
-        assert "not initialized" in result
+        assert "not configured" in result
 
 
 class TestCreateTools:
     """Tests for create_tools function."""
 
-    def test_creates_all_tools(self, mock_sandbox):
-        """Should create all eight tools."""
-        tools = create_tools(mock_sandbox)
+    def test_create_rpc_tools(self, mock_sandbox):
+        """Should create all eight tools with sandbox (RPC mode)."""
+        tools = create_tools(sandbox=mock_sandbox)
         assert len(tools) == 8
 
         tool_names = {t.name for t in tools}
@@ -422,10 +424,46 @@ class TestCreateTools:
         assert "run_command" in tool_names
 
     def test_tools_have_sandbox_reference(self, mock_sandbox):
-        """All tools should have sandbox reference."""
-        tools = create_tools(mock_sandbox)
+        """All tools should have sandbox reference in RPC mode."""
+        tools = create_tools(sandbox=mock_sandbox)
         for tool in tools:
             assert tool.sandbox is mock_sandbox
+            assert tool.workspace is None
+
+    def test_create_direct_tools_with_workspace(self, tmp_path):
+        """Should create all eight tools with workspace (direct mode)."""
+        workspace = str(tmp_path)
+        tools = create_tools(workspace=workspace)
+        assert len(tools) == 8
+
+        for tool in tools:
+            assert tool.workspace == workspace
+            assert tool.sandbox is None
+
+    def test_create_direct_tools_helper(self, tmp_path):
+        """create_direct_tools should work same as create_tools(workspace=...)."""
+        workspace = str(tmp_path)
+        tools = create_direct_tools(workspace)
+        assert len(tools) == 8
+        for tool in tools:
+            assert tool.workspace == workspace
+
+    def test_create_rpc_tools_helper(self, mock_sandbox):
+        """create_rpc_tools should work same as create_tools(sandbox=...)."""
+        tools = create_rpc_tools(mock_sandbox)
+        assert len(tools) == 8
+        for tool in tools:
+            assert tool.sandbox is mock_sandbox
+
+    def test_create_tools_requires_exactly_one_arg(self, mock_sandbox, tmp_path):
+        """create_tools should raise error if both or neither args provided."""
+        # Neither provided
+        with pytest.raises(ValueError, match="Must specify workspace or sandbox"):
+            create_tools()
+
+        # Both provided
+        with pytest.raises(ValueError, match="Specify workspace OR sandbox, not both"):
+            create_tools(workspace=str(tmp_path), sandbox=mock_sandbox)
 
 
 class TestToolSchemas:

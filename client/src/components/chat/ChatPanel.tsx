@@ -21,6 +21,7 @@ export function ChatPanel({ userId, projectId, activeModule }: ChatPanelProps) {
     userId,
     projectId,
     activeModule,
+    chatHistory: messages,
     onSuccess: (response) => {
       const assistantMessage: Message = {
         id: crypto.randomUUID(),
