@@ -29,7 +29,8 @@ export function PreviewPane({
   const [isLoading, setIsLoading] = useState(true)
   const [hasError, setHasError] = useState(false)
 
-  const previewUrl = buildPreviewUrl(userId, projectId, activeModule)
+  const basePreviewUrl = buildPreviewUrl(userId, projectId, activeModule)
+  const previewUrl = `${basePreviewUrl}${basePreviewUrl.includes('?') ? '&' : '?'}t=${refreshKey}`
 
   // Reset loading/error state on module change or refresh
   useEffect(() => {

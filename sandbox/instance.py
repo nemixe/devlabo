@@ -458,7 +458,7 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
 
             # Initialize OpenRouter-compatible LLM
             llm = ChatOpenAI(
-                model="anthropic/claude-sonnet-4",
+                model="google/gemini-3-flash-preview",
                 openai_api_key=api_key,
                 openai_api_base="https://openrouter.ai/api/v1",
                 temperature=0.1,
@@ -492,13 +492,19 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
         return changed
 
     @modal.method()
-    def chat(self, message: str, chat_history: list[dict] | None = None) -> dict:
+    def chat(
+        self,
+        message: str,
+        chat_history: list[dict] | None = None,
+        context: dict | None = None,
+    ) -> dict:
         """
         Process a user message via the embedded AI agent.
 
         Args:
             message: The user's message/prompt.
             chat_history: Optional list of previous messages for context.
+            context: Optional context dict with activeModule, userId, projectId.
 
         Returns:
             Dict with 'response', 'files_changed', and 'error' keys.
@@ -511,10 +517,28 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
             }
 
         try:
-            from langchain_core.messages import AIMessage, HumanMessage
+            from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
             # Build messages list
             messages = []
+
+            # Add dynamic context as a system message if provided
+            if context:
+                active_module = context.get("activeModule", "prototype")
+                module_descriptions = {
+                    "prototype": "raw HTML/React-Lite prototype (source of truth, read-only)",
+                    "frontend": "production React/Next.js code (generated)",
+                    "dbml": "database schema definitions (generated)",
+                    "tests": "test files (generated)",
+                }
+                desc = module_descriptions.get(active_module, active_module)
+                context_message = (
+                    f"## Current Context\n"
+                    f"The user is currently viewing the **{active_module}** tab ({desc}). "
+                    f"When they ask questions like 'this file' or 'what's here', "
+                    f"they are likely referring to content in this module."
+                )
+                messages.append(SystemMessage(content=context_message))
 
             # Add chat history if provided
             if chat_history:

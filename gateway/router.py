@@ -336,6 +336,7 @@ def create_gateway_app(
             body = await request.json()
             message = body.get("message", "")
             chat_history = body.get("chat_history", None)
+            context = body.get("context", {})
 
             if not embedded_sandbox:
                 raise HTTPException(
@@ -344,7 +345,11 @@ def create_gateway_app(
                 )
 
             # Call the embedded agent's chat method (local call within container)
-            result = embedded_sandbox.chat.local(message=message, chat_history=chat_history)
+            result = embedded_sandbox.chat.local(
+                message=message,
+                chat_history=chat_history,
+                context=context,
+            )
 
             return {
                 "message": result.get("response", "No response"),
