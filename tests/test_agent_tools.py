@@ -1,10 +1,18 @@
 """Tests for agent tools."""
 
-from unittest.mock import MagicMock
-
 import pytest
 
-from agent.tools import ListFilesTool, ReadFileTool, WriteFileTool, create_tools
+from agent.tools import (
+    DeleteFileTool,
+    DeleteFilesTool,
+    ListFilesTool,
+    ReadFileTool,
+    RenameFileTool,
+    RenameFilesTool,
+    RunCommandTool,
+    WriteFileTool,
+    create_tools,
+)
 
 
 class MockSandbox:
@@ -54,6 +62,72 @@ class MockSandbox:
             return list(self.files[scope].keys())
 
         return self.MockRemoteMethod(_list_files)
+
+    @property
+    def delete_file(self):
+        def _delete_file(scope: str, relative_path: str) -> bool:
+            if scope not in self.files:
+                raise ValueError(f"Invalid scope: {scope}")
+            if relative_path not in self.files[scope]:
+                raise FileNotFoundError(f"File not found: {relative_path}")
+            del self.files[scope][relative_path]
+            return True
+
+        return self.MockRemoteMethod(_delete_file)
+
+    @property
+    def delete_files(self):
+        def _delete_files(scope: str, paths: list[str]) -> dict:
+            if scope not in self.files:
+                return {"succeeded": [], "failed": [{"path": p, "error": f"Invalid scope: {scope}"} for p in paths]}
+            succeeded = []
+            failed = []
+            for path in paths:
+                if path in self.files[scope]:
+                    del self.files[scope][path]
+                    succeeded.append(path)
+                else:
+                    failed.append({"path": path, "error": f"File not found: {path}"})
+            return {"succeeded": succeeded, "failed": failed}
+
+        return self.MockRemoteMethod(_delete_files)
+
+    @property
+    def rename_file(self):
+        def _rename_file(scope: str, old_path: str, new_path: str) -> bool:
+            if scope not in self.files:
+                raise ValueError(f"Invalid scope: {scope}")
+            if old_path not in self.files[scope]:
+                raise FileNotFoundError(f"File not found: {old_path}")
+            self.files[scope][new_path] = self.files[scope].pop(old_path)
+            return True
+
+        return self.MockRemoteMethod(_rename_file)
+
+    @property
+    def rename_files(self):
+        def _rename_files(scope: str, renames: list[tuple[str, str]]) -> dict:
+            if scope not in self.files:
+                return {"succeeded": [], "failed": [{"old_path": old, "new_path": new, "error": f"Invalid scope: {scope}"} for old, new in renames]}
+            succeeded = []
+            failed = []
+            for old_path, new_path in renames:
+                if old_path in self.files[scope]:
+                    self.files[scope][new_path] = self.files[scope].pop(old_path)
+                    succeeded.append((old_path, new_path))
+                else:
+                    failed.append({"old_path": old_path, "new_path": new_path, "error": f"File not found: {old_path}"})
+            return {"succeeded": succeeded, "failed": failed}
+
+        return self.MockRemoteMethod(_rename_files)
+
+    @property
+    def run_command(self):
+        def _run_command(command: str, cwd: str | None = None) -> dict:
+            # Simple mock that just returns success
+            return {"stdout": f"Executed: {command}", "stderr": "", "returncode": 0}
+
+        return self.MockRemoteMethod(_run_command)
 
 
 @pytest.fixture
@@ -149,18 +223,203 @@ class TestListFilesTool:
         assert "not initialized" in result
 
 
+class TestDeleteFileTool:
+    """Tests for DeleteFileTool."""
+
+    def test_delete_existing_file(self, mock_sandbox):
+        """Should successfully delete an existing file."""
+        # First add a file to delete
+        mock_sandbox.files["frontend"]["to_delete.txt"] = "delete me"
+        tool = DeleteFileTool(sandbox=mock_sandbox)
+        result = tool._run(scope="frontend", path="to_delete.txt")
+        assert "Successfully deleted" in result
+        assert "to_delete.txt" not in mock_sandbox.files["frontend"]
+
+    def test_delete_nonexistent_file(self, mock_sandbox):
+        """Should return error for non-existent file."""
+        tool = DeleteFileTool(sandbox=mock_sandbox)
+        result = tool._run(scope="frontend", path="missing.txt")
+        assert "Error" in result
+        assert "not found" in result
+
+    def test_delete_from_prototype_blocked(self, mock_sandbox):
+        """Should block deletes from prototype (read-only)."""
+        tool = DeleteFileTool(sandbox=mock_sandbox)
+        result = tool._run(scope="prototype", path="index.html")
+        assert "Error" in result
+        assert "Cannot delete from scope 'prototype'" in result
+        # Ensure file was not deleted
+        assert "index.html" in mock_sandbox.files["prototype"]
+
+    def test_delete_no_sandbox(self):
+        """Should return error if sandbox not initialized."""
+        tool = DeleteFileTool(sandbox=None)
+        result = tool._run(scope="frontend", path="test.txt")
+        assert "Error" in result
+        assert "not initialized" in result
+
+
+class TestRenameFileTool:
+    """Tests for RenameFileTool."""
+
+    def test_rename_existing_file(self, mock_sandbox):
+        """Should successfully rename an existing file."""
+        mock_sandbox.files["frontend"]["old_name.txt"] = "content"
+        tool = RenameFileTool(sandbox=mock_sandbox)
+        result = tool._run(scope="frontend", old_path="old_name.txt", new_path="new_name.txt")
+        assert "Successfully renamed" in result
+        assert "old_name.txt" not in mock_sandbox.files["frontend"]
+        assert mock_sandbox.files["frontend"]["new_name.txt"] == "content"
+
+    def test_rename_nonexistent_file(self, mock_sandbox):
+        """Should return error for non-existent file."""
+        tool = RenameFileTool(sandbox=mock_sandbox)
+        result = tool._run(scope="frontend", old_path="missing.txt", new_path="new.txt")
+        assert "Error" in result
+        assert "not found" in result
+
+    def test_rename_in_prototype_blocked(self, mock_sandbox):
+        """Should block renames in prototype (read-only)."""
+        tool = RenameFileTool(sandbox=mock_sandbox)
+        result = tool._run(scope="prototype", old_path="index.html", new_path="main.html")
+        assert "Error" in result
+        assert "Cannot rename in scope 'prototype'" in result
+        # Ensure file was not renamed
+        assert "index.html" in mock_sandbox.files["prototype"]
+
+    def test_rename_no_sandbox(self):
+        """Should return error if sandbox not initialized."""
+        tool = RenameFileTool(sandbox=None)
+        result = tool._run(scope="frontend", old_path="a.txt", new_path="b.txt")
+        assert "Error" in result
+        assert "not initialized" in result
+
+
+class TestDeleteFilesTool:
+    """Tests for DeleteFilesTool (bulk delete)."""
+
+    def test_delete_multiple_files(self, mock_sandbox):
+        """Should successfully delete multiple files."""
+        mock_sandbox.files["frontend"]["a.txt"] = "a"
+        mock_sandbox.files["frontend"]["b.txt"] = "b"
+        mock_sandbox.files["frontend"]["c.txt"] = "c"
+        tool = DeleteFilesTool(sandbox=mock_sandbox)
+        result = tool._run(scope="frontend", paths=["a.txt", "b.txt"])
+        assert "Successfully deleted 2 file(s)" in result
+        assert "a.txt" not in mock_sandbox.files["frontend"]
+        assert "b.txt" not in mock_sandbox.files["frontend"]
+        assert "c.txt" in mock_sandbox.files["frontend"]  # Unchanged
+
+    def test_delete_partial_failure(self, mock_sandbox):
+        """Should report both successes and failures."""
+        mock_sandbox.files["frontend"]["exists.txt"] = "content"
+        tool = DeleteFilesTool(sandbox=mock_sandbox)
+        result = tool._run(scope="frontend", paths=["exists.txt", "missing.txt"])
+        assert "Successfully deleted 1 file(s)" in result
+        assert "Failed to delete 1 file(s)" in result
+        assert "missing.txt" in result
+
+    def test_delete_from_prototype_blocked(self, mock_sandbox):
+        """Should block deletes from prototype (read-only)."""
+        tool = DeleteFilesTool(sandbox=mock_sandbox)
+        result = tool._run(scope="prototype", paths=["index.html"])
+        assert "Error" in result
+        assert "Cannot delete from scope 'prototype'" in result
+
+    def test_delete_no_sandbox(self):
+        """Should return error if sandbox not initialized."""
+        tool = DeleteFilesTool(sandbox=None)
+        result = tool._run(scope="frontend", paths=["test.txt"])
+        assert "Error" in result
+        assert "not initialized" in result
+
+
+class TestRenameFilesTool:
+    """Tests for RenameFilesTool (bulk rename)."""
+
+    def test_rename_multiple_files(self, mock_sandbox):
+        """Should successfully rename multiple files."""
+        mock_sandbox.files["frontend"]["old1.txt"] = "content1"
+        mock_sandbox.files["frontend"]["old2.txt"] = "content2"
+        tool = RenameFilesTool(sandbox=mock_sandbox)
+        result = tool._run(
+            scope="frontend",
+            renames=[("old1.txt", "new1.txt"), ("old2.txt", "new2.txt")]
+        )
+        assert "Successfully renamed 2 file(s)" in result
+        assert "old1.txt" not in mock_sandbox.files["frontend"]
+        assert "old2.txt" not in mock_sandbox.files["frontend"]
+        assert mock_sandbox.files["frontend"]["new1.txt"] == "content1"
+        assert mock_sandbox.files["frontend"]["new2.txt"] == "content2"
+
+    def test_rename_partial_failure(self, mock_sandbox):
+        """Should report both successes and failures."""
+        mock_sandbox.files["frontend"]["exists.txt"] = "content"
+        tool = RenameFilesTool(sandbox=mock_sandbox)
+        result = tool._run(
+            scope="frontend",
+            renames=[("exists.txt", "renamed.txt"), ("missing.txt", "new.txt")]
+        )
+        assert "Successfully renamed 1 file(s)" in result
+        assert "Failed to rename 1 file(s)" in result
+        assert "missing.txt" in result
+
+    def test_rename_in_prototype_blocked(self, mock_sandbox):
+        """Should block renames in prototype (read-only)."""
+        tool = RenameFilesTool(sandbox=mock_sandbox)
+        result = tool._run(scope="prototype", renames=[("a.txt", "b.txt")])
+        assert "Error" in result
+        assert "Cannot rename in scope 'prototype'" in result
+
+    def test_rename_no_sandbox(self):
+        """Should return error if sandbox not initialized."""
+        tool = RenameFilesTool(sandbox=None)
+        result = tool._run(scope="frontend", renames=[("a.txt", "b.txt")])
+        assert "Error" in result
+        assert "not initialized" in result
+
+
+class TestRunCommandTool:
+    """Tests for RunCommandTool."""
+
+    def test_run_command_success(self, mock_sandbox):
+        """Should successfully run a command."""
+        tool = RunCommandTool(sandbox=mock_sandbox)
+        result = tool._run(command="ls -la")
+        assert "Executed: ls -la" in result
+        assert "exit code: 0" in result
+
+    def test_run_command_with_cwd(self, mock_sandbox):
+        """Should run command with working directory."""
+        tool = RunCommandTool(sandbox=mock_sandbox)
+        result = tool._run(command="pwd", cwd="frontend")
+        assert "exit code: 0" in result
+
+    def test_run_command_no_sandbox(self):
+        """Should return error if sandbox not initialized."""
+        tool = RunCommandTool(sandbox=None)
+        result = tool._run(command="ls")
+        assert "Error" in result
+        assert "not initialized" in result
+
+
 class TestCreateTools:
     """Tests for create_tools function."""
 
     def test_creates_all_tools(self, mock_sandbox):
-        """Should create all three tools."""
+        """Should create all eight tools."""
         tools = create_tools(mock_sandbox)
-        assert len(tools) == 3
+        assert len(tools) == 8
 
         tool_names = {t.name for t in tools}
         assert "read_file" in tool_names
         assert "write_file" in tool_names
         assert "list_files" in tool_names
+        assert "delete_file" in tool_names
+        assert "delete_files" in tool_names
+        assert "rename_file" in tool_names
+        assert "rename_files" in tool_names
+        assert "run_command" in tool_names
 
     def test_tools_have_sandbox_reference(self, mock_sandbox):
         """All tools should have sandbox reference."""

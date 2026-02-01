@@ -1,9 +1,12 @@
 """LangChain-compatible tools for file operations via Sandbox RPC."""
 
+import logging
 from typing import Any
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class ReadFileInput(BaseModel):
@@ -65,7 +68,7 @@ class WriteFileTool(BaseTool):
     WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
 
     def _run(self, scope: str, path: str, content: str) -> str:
-        """Write file via Sandbox RPC."""
+        """Write file via Sandbox RPC. CloudBucketMount handles R2 persistence."""
         if self.sandbox is None:
             return "Error: Sandbox not initialized"
 
@@ -138,7 +141,7 @@ class DeleteFileTool(BaseTool):
     WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
 
     def _run(self, scope: str, path: str) -> str:
-        """Delete file via Sandbox RPC."""
+        """Delete file via Sandbox RPC. CloudBucketMount handles R2 persistence."""
         if self.sandbox is None:
             return "Error: Sandbox not initialized"
 
@@ -152,6 +155,62 @@ class DeleteFileTool(BaseTool):
             return f"Error: File '{path}' not found in scope '{scope}'"
         except Exception as e:
             return f"Error deleting file: {e}"
+
+
+class DeleteFilesInput(BaseModel):
+    """Input schema for DeleteFilesTool."""
+
+    scope: str = Field(
+        description="The scope directory to delete from (frontend, dbml, test-case). "
+        "Note: 'prototype' is read-only."
+    )
+    paths: list[str] = Field(description="List of relative paths to delete")
+
+
+class DeleteFilesTool(BaseTool):
+    """Tool for bulk deleting files from the project workspace."""
+
+    name: str = "delete_files"
+    description: str = (
+        "Bulk delete multiple files from the project. Use this instead of calling "
+        "delete_file multiple times. Returns detailed success/failure info. "
+        "Note: 'prototype' is read-only."
+    )
+    args_schema: type[BaseModel] = DeleteFilesInput
+    sandbox: Any = None
+
+    # Scopes the agent is allowed to delete from
+    WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
+
+    def _run(self, scope: str, paths: list[str]) -> str:
+        """Bulk delete files via Sandbox RPC."""
+        if self.sandbox is None:
+            return "Error: Sandbox not initialized"
+
+        if scope not in self.WRITABLE_SCOPES:
+            return f"Error: Cannot delete from scope '{scope}'. Writable scopes: {', '.join(sorted(self.WRITABLE_SCOPES))}"
+
+        if not paths:
+            return "Error: No paths specified"
+
+        try:
+            result = self.sandbox.delete_files.remote(scope=scope, paths=paths)
+            succeeded = result.get("succeeded", [])
+            failed = result.get("failed", [])
+
+            output = []
+            if succeeded:
+                output.append(f"Successfully deleted {len(succeeded)} file(s):")
+                for p in succeeded:
+                    output.append(f"  - '{p}'")
+            if failed:
+                output.append(f"Failed to delete {len(failed)} file(s):")
+                for f in failed:
+                    output.append(f"  - '{f['path']}': {f['error']}")
+
+            return "\n".join(output) if output else "No files processed"
+        except Exception as e:
+            return f"Error during bulk delete: {e}"
 
 
 class RenameFileInput(BaseModel):
@@ -182,7 +241,7 @@ class RenameFileTool(BaseTool):
     WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
 
     def _run(self, scope: str, old_path: str, new_path: str) -> str:
-        """Rename file via Sandbox RPC."""
+        """Rename file via Sandbox RPC. CloudBucketMount handles R2 persistence."""
         if self.sandbox is None:
             return "Error: Sandbox not initialized"
 
@@ -196,6 +255,112 @@ class RenameFileTool(BaseTool):
             return f"Error: File '{old_path}' not found in scope '{scope}'"
         except Exception as e:
             return f"Error renaming file: {e}"
+
+
+class RenameFilesInput(BaseModel):
+    """Input schema for RenameFilesTool."""
+
+    scope: str = Field(
+        description="The scope directory (frontend, dbml, test-case). "
+        "Note: 'prototype' is read-only."
+    )
+    renames: list[tuple[str, str]] = Field(
+        description="List of (old_path, new_path) tuples to rename"
+    )
+
+
+class RenameFilesTool(BaseTool):
+    """Tool for bulk renaming/moving files within the project workspace."""
+
+    name: str = "rename_files"
+    description: str = (
+        "Bulk rename or move multiple files within the project. Use this instead of "
+        "calling rename_file multiple times. Each rename is (old_path, new_path). "
+        "All paths must be in the same scope. Returns detailed success/failure info. "
+        "Note: 'prototype' is read-only."
+    )
+    args_schema: type[BaseModel] = RenameFilesInput
+    sandbox: Any = None
+
+    # Scopes the agent is allowed to rename in
+    WRITABLE_SCOPES: frozenset[str] = frozenset({"frontend", "dbml", "test-case"})
+
+    def _run(self, scope: str, renames: list[tuple[str, str]]) -> str:
+        """Bulk rename files via Sandbox RPC."""
+        if self.sandbox is None:
+            return "Error: Sandbox not initialized"
+
+        if scope not in self.WRITABLE_SCOPES:
+            return f"Error: Cannot rename in scope '{scope}'. Writable scopes: {', '.join(sorted(self.WRITABLE_SCOPES))}"
+
+        if not renames:
+            return "Error: No renames specified"
+
+        try:
+            result = self.sandbox.rename_files.remote(scope=scope, renames=renames)
+            succeeded = result.get("succeeded", [])
+            failed = result.get("failed", [])
+
+            output = []
+            if succeeded:
+                output.append(f"Successfully renamed {len(succeeded)} file(s):")
+                for old, new in succeeded:
+                    output.append(f"  - '{old}' -> '{new}'")
+            if failed:
+                output.append(f"Failed to rename {len(failed)} file(s):")
+                for f in failed:
+                    output.append(f"  - '{f['old_path']}': {f['error']}")
+
+            return "\n".join(output) if output else "No files processed"
+        except Exception as e:
+            return f"Error during bulk rename: {e}"
+
+
+class RunCommandInput(BaseModel):
+    """Input schema for RunCommandTool."""
+
+    command: str = Field(description="The shell command to run")
+    cwd: str | None = Field(
+        default=None,
+        description="Working directory relative to workspace (e.g., 'frontend', 'frontend/src'). "
+        "Defaults to workspace root.",
+    )
+
+
+class RunCommandTool(BaseTool):
+    """Tool for running shell commands in the sandbox workspace."""
+
+    name: str = "run_command"
+    description: str = (
+        "Run a shell command in the sandbox workspace. Use this for running build "
+        "commands, linters, tests, or other CLI tools. Commands run in a sandboxed "
+        "environment with a 30-second timeout. "
+        "IMPORTANT: Do NOT use this for file operations (create, write, delete, rename). "
+        "Use write_file, delete_file, and rename_file tools instead - they work reliably "
+        "with cloud storage. "
+        "Available directories: prototype (read-only), frontend, dbml, test-case."
+    )
+    args_schema: type[BaseModel] = RunCommandInput
+    sandbox: Any = None
+
+    def _run(self, command: str, cwd: str | None = None) -> str:
+        """Run command via Sandbox RPC."""
+        if self.sandbox is None:
+            return "Error: Sandbox not initialized"
+
+        try:
+            result = self.sandbox.run_command.remote(command=command, cwd=cwd)
+
+            output = []
+            if result["stdout"]:
+                output.append(f"stdout:\n{result['stdout']}")
+            if result["stderr"]:
+                output.append(f"stderr:\n{result['stderr']}")
+            output.append(f"exit code: {result['returncode']}")
+
+            return "\n".join(output) if output else "Command completed with no output"
+        except Exception as e:
+            return f"Error running command: {e}"
 
 
 def create_tools(sandbox: Any) -> list[BaseTool]:
@@ -213,5 +378,8 @@ def create_tools(sandbox: Any) -> list[BaseTool]:
         WriteFileTool(sandbox=sandbox),
         ListFilesTool(sandbox=sandbox),
         DeleteFileTool(sandbox=sandbox),
+        DeleteFilesTool(sandbox=sandbox),
         RenameFileTool(sandbox=sandbox),
+        RenameFilesTool(sandbox=sandbox),
+        RunCommandTool(sandbox=sandbox),
     ]

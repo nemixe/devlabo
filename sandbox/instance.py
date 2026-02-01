@@ -1,6 +1,8 @@
 """ProjectSandbox Modal class for running multi-process dev environments."""
 
 import logging
+import os
+import shutil
 from pathlib import Path
 
 import modal
@@ -17,7 +19,6 @@ sandbox_image_with_packages = sandbox_image.add_local_python_source(
 )
 
 # Import from local packages (after image is set up, these are runtime imports)
-from common.r2_sync import R2Sync
 from gateway.router import MODULE_PORTS, create_gateway_app
 from sandbox.process_manager import ProcessConfig, ProcessManager
 
@@ -27,6 +28,33 @@ app = modal.App("devlabo-sandbox")
 # Workspace paths inside the container
 WORKSPACE_ROOT = "/root/workspace"
 WORKSPACE_DIRS = ["prototype", "frontend", "dbml", "test-case"]
+
+# R2 configuration
+# Read endpoint URL from environment (set in .env or Modal secret)
+# Format: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "devlabo")
+R2_ENDPOINT_URL = os.environ.get("R2_ENDPOINT_URL")
+
+# R2 secret with credentials (must have AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
+r2_secret = modal.Secret.from_name("r2-secret")
+
+# CloudBucketMount for R2 persistence
+# All file operations automatically persist to R2 - no explicit sync needed
+# bucket_endpoint_url must be set via R2_ENDPOINT_URL environment variable before deploy
+if R2_ENDPOINT_URL:
+    r2_mount = modal.CloudBucketMount(
+        bucket_name=R2_BUCKET_NAME,
+        bucket_endpoint_url=R2_ENDPOINT_URL,
+        secret=r2_secret,
+    )
+else:
+    # CloudBucketMount not configured - will use local filesystem only
+    # Set R2_ENDPOINT_URL in your environment before deploying
+    r2_mount = None
+    logger.warning(
+        "R2_ENDPOINT_URL not set. CloudBucketMount disabled. "
+        "Files will not persist across container restarts."
+    )
 
 # Default user/project for the ASGI web endpoint
 DEFAULT_USER_ID = "default"
@@ -83,7 +111,7 @@ def get_default_process_configs() -> list[ProcessConfig]:
 
 @app.cls(
     image=sandbox_image_with_packages,
-    secrets=[modal.Secret.from_name("r2-secret")],
+    volumes={WORKSPACE_ROOT: r2_mount} if r2_mount else {},
     timeout=3600,  # 1 hour max lifetime
     scaledown_window=300,  # 5 min idle timeout (renamed from container_idle_timeout)
 )
@@ -93,9 +121,11 @@ class ProjectSandbox:
     Modal class that runs a multi-process sandbox for a user's project.
 
     Combines:
-    - R2 sync for persistent storage
+    - CloudBucketMount for automatic R2 persistence (no explicit sync needed)
     - ProcessManager for 4 dev servers
     - FastAPI gateway for HTTP/WebSocket routing
+
+    Files written to /root/workspace are automatically persisted to R2.
     """
 
     # Use modal.parameter() for parameterization (Modal 1.0 pattern)
@@ -107,32 +137,26 @@ class ProjectSandbox:
         """
         Container startup lifecycle hook.
 
-        1. Creates workspace directories
-        2. Pulls files from R2
-        3. Sets up scaffold files if directories are empty
-        4. Starts all dev server processes
+        1. Creates workspace directories (backed by R2 via CloudBucketMount)
+        2. Sets up scaffold files if directories are empty
+        3. Starts all dev server processes
         """
-        self.workspace = WORKSPACE_ROOT
-        self.r2_prefix = f"{self.user_id}/{self.project_id}/"
+        # Workspace is backed by R2 via CloudBucketMount - no pull needed
+        self.workspace = f"{WORKSPACE_ROOT}/{self.user_id}/{self.project_id}"
         self._process_manager: ProcessManager | None = None
-        self._r2_sync: R2Sync | None = None
 
         logger.info(f"Starting sandbox for {self.user_id}/{self.project_id}")
 
-        # 1. Create workspace directories
+        # 1. Create workspace directories (persisted to R2 automatically)
         self._create_workspace_dirs()
 
-        # 2. Initialize R2 sync and pull files
-        self._setup_r2_sync()
-        self._pull_from_r2()
-
-        # 3. Set up scaffold files for empty directories
+        # 2. Set up scaffold files for empty directories
         self._setup_scaffolds()
 
-        # 4. Initialize and start ProcessManager
+        # 3. Initialize and start ProcessManager
         self._start_processes()
 
-        # 5. Create gateway app
+        # 4. Create gateway app
         self._gateway_app = create_gateway_app(
             process_manager=self._process_manager,
             client_timeout=30.0,
@@ -145,12 +169,12 @@ class ProjectSandbox:
         """
         Container shutdown lifecycle hook.
 
-        1. Stops all dev server processes
-        2. Pushes files to R2
+        Stops all dev server processes.
+        No R2 sync needed - CloudBucketMount handles persistence automatically.
         """
         logger.info(f"Shutting down sandbox for {self.user_id}/{self.project_id}")
 
-        # 1. Stop all processes
+        # Stop all processes
         if self._process_manager:
             import asyncio
 
@@ -160,9 +184,6 @@ class ProjectSandbox:
             finally:
                 loop.close()
 
-        # 2. Push files to R2
-        self._push_to_r2()
-
         logger.info("Sandbox shutdown complete")
 
     @modal.asgi_app()
@@ -171,7 +192,7 @@ class ProjectSandbox:
         return self._gateway_app
 
     def _create_workspace_dirs(self) -> None:
-        """Create workspace directories."""
+        """Create workspace directories (backed by R2 via CloudBucketMount)."""
         workspace_path = Path(self.workspace)
         workspace_path.mkdir(parents=True, exist_ok=True)
 
@@ -179,39 +200,6 @@ class ProjectSandbox:
             dir_path = workspace_path / dirname
             dir_path.mkdir(parents=True, exist_ok=True)
             logger.debug(f"Created directory: {dir_path}")
-
-    def _setup_r2_sync(self) -> None:
-        """Initialize R2 sync client."""
-        try:
-            self._r2_sync = R2Sync(prefix=self.r2_prefix)
-            logger.info(f"R2 sync initialized with prefix: {self.r2_prefix}")
-        except Exception as e:
-            logger.warning(f"R2 sync initialization failed: {e}")
-            self._r2_sync = None
-
-    def _pull_from_r2(self) -> None:
-        """Pull files from R2 to workspace."""
-        if not self._r2_sync:
-            logger.warning("Skipping R2 pull - sync not initialized")
-            return
-
-        try:
-            count = self._r2_sync.pull(self.workspace)
-            logger.info(f"Pulled {count} files from R2")
-        except Exception as e:
-            logger.warning(f"R2 pull failed: {e}")
-
-    def _push_to_r2(self) -> None:
-        """Push files from workspace to R2."""
-        if not self._r2_sync:
-            logger.warning("Skipping R2 push - sync not initialized")
-            return
-
-        try:
-            count = self._r2_sync.push(self.workspace)
-            logger.info(f"Pushed {count} files to R2")
-        except Exception as e:
-            logger.warning(f"R2 push failed: {e}")
 
     def _setup_scaffolds(self) -> None:
         """Set up scaffold files for empty directories."""
@@ -335,17 +323,16 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
     @modal.method()
     def get_status(self) -> dict:
         """
-        Get the status of all processes and R2 sync.
+        Get the status of all processes.
 
         Returns:
-            Dict with process statuses and R2 sync status.
+            Dict with process statuses.
         """
         result = {
             "user_id": self.user_id,
             "project_id": self.project_id,
             "workspace": self.workspace,
-            "r2_prefix": self.r2_prefix,
-            "r2_connected": self._r2_sync is not None,
+            "storage": "CloudBucketMount (R2)",
         }
 
         if self._process_manager:
@@ -358,21 +345,56 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
         return result
 
     @modal.method()
-    def sync_to_r2(self) -> int:
+    def run_command(self, command: str, cwd: str | None = None) -> dict:
         """
-        Manually trigger sync to R2.
+        Run a shell command in the workspace.
+
+        Args:
+            command: The shell command to run.
+            cwd: Working directory (relative to workspace). Defaults to workspace root.
 
         Returns:
-            Number of files pushed to R2.
+            Dict with 'stdout', 'stderr', 'returncode'.
         """
-        if not self._r2_sync:
-            return 0
+        import subprocess
+
+        work_dir = Path(self.workspace)
+        if cwd:
+            work_dir = work_dir / cwd
+            # Security: ensure we stay within workspace
+            if not str(work_dir.resolve()).startswith(self.workspace):
+                return {
+                    "stdout": "",
+                    "stderr": "Error: Cannot execute outside workspace",
+                    "returncode": 1,
+                }
 
         try:
-            return self._r2_sync.push(self.workspace)
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "stdout": "",
+                "stderr": "Error: Command timed out after 30 seconds",
+                "returncode": 124,
+            }
         except Exception as e:
-            logger.error(f"Manual R2 sync failed: {e}")
-            return 0
+            return {
+                "stdout": "",
+                "stderr": f"Error: {e}",
+                "returncode": 1,
+            }
 
     @modal.method()
     def restart_process(self, name: str) -> bool:
@@ -486,6 +508,30 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
         return True
 
     @modal.method()
+    def delete_files(self, scope: str, paths: list[str]) -> dict:
+        """
+        Bulk delete files from a scoped directory.
+
+        Args:
+            scope: The scope directory (prototype, frontend, dbml, test-case).
+            paths: List of relative paths to delete.
+
+        Returns:
+            Dict with 'succeeded' (list of paths) and 'failed' (list of dicts with error info).
+        """
+        succeeded = []
+        failed = []
+
+        for path in paths:
+            try:
+                self.delete_file(scope, path)
+                succeeded.append(path)
+            except Exception as e:
+                failed.append({"path": path, "error": str(e)})
+
+        return {"succeeded": succeeded, "failed": failed}
+
+    @modal.method()
     def rename_file(self, scope: str, old_path: str, new_path: str) -> bool:
         """
         Rename/move a file within a scoped directory.
@@ -513,8 +559,43 @@ document.getElementById('app').innerHTML = '<h1>Frontend Ready</h1>';
 
         # Create parent directories if needed
         new_file.parent.mkdir(parents=True, exist_ok=True)
-        old_file.rename(new_file)
+
+        # S3 Mountpoint does NOT support rename operations.
+        # Use copy + delete instead (both are supported).
+        shutil.copy2(old_file, new_file)  # Preserves metadata
+        old_file.unlink()  # Delete original
+
+        # Verify the rename actually succeeded (S3 Mountpoint can be flaky)
+        if not new_file.exists():
+            raise OSError(f"Rename failed: '{new_path}' was not created")
+        if old_file.exists():
+            raise OSError(f"Rename failed: '{old_path}' still exists after delete")
+
         return True
+
+    @modal.method()
+    def rename_files(self, scope: str, renames: list[tuple[str, str]]) -> dict:
+        """
+        Bulk rename/move files within a scoped directory.
+
+        Args:
+            scope: The scope directory (prototype, frontend, dbml, test-case).
+            renames: List of (old_path, new_path) tuples.
+
+        Returns:
+            Dict with 'succeeded' (list of tuples) and 'failed' (list of dicts with error info).
+        """
+        succeeded = []
+        failed = []
+
+        for old_path, new_path in renames:
+            try:
+                self.rename_file(scope, old_path, new_path)
+                succeeded.append((old_path, new_path))
+            except Exception as e:
+                failed.append({"old_path": old_path, "new_path": new_path, "error": str(e)})
+
+        return {"succeeded": succeeded, "failed": failed}
 
 
 # Standalone test entrypoint
