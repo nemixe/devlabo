@@ -15,7 +15,7 @@ AI-powered app builder using Brain-Body-Storage architecture.
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/patchwork-body/devlabo.git
+git clone https://github.com/nemixe/devlabo.git
 cd devlabo
 
 # Backend (Python)
